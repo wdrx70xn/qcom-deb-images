@@ -1,91 +1,70 @@
 name: Build U-Boot for RB1
-
-on:
-  # run weekly on Monday at 8:30am
+'on':
   schedule:
-    - cron: '30 6 * * 1'
-  # allow manual runs
-  workflow_dispatch:
-
-# implicitely set all other permissions to none
+  - cron: 30 6 * * 1
+  workflow_dispatch: null
 permissions:
-  contents: read # actions/checkout
-
+  contents: read
 env:
-  # github runs are only unique per repository and may also be re-run; create a
-  # build id for the current run
-  BUILD_ID: ${{ github.event.repository.name }}-${{ github.run_id }}-${{ github.run_attempt }}
-
-# cancel in progress builds for this workflow triggered by the same ref
+  BUILD_ID: ${{ github.event.repository.name }}-${{ github.run_id }}-${{ github.run_attempt
+    }}
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
-
 jobs:
   build-u-boot-rb1:
-    # don't run cron from forks of the main repository or from other branches
     if: github.repository == 'qualcomm-linux/qcom-deb-images' && github.ref == 'refs/heads/main'
-    # for cross-builds
-    runs-on: [self-hosted, qcom-u2404, amd64]
-    # alternative for native builds, but overkill to do both
-    #runs-on: [self-hosted, qcom-u2404, arm64]
+    runs-on: ubuntu-latest
     container:
       image: public.ecr.aws/debian/debian:trixie
       volumes:
-        - /efs/qli/qcom-deb-images:/efs
+      - /efs/qli/qcom-deb-images:/efs
     steps:
-      - uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
+    - uses: actions/checkout@v6
+      with:
+        fetch-depth: 0
+    - name: Update OS packages
+      run: 'set -ux
 
-      # make sure we have latest packages first, to get latest fixes, to avoid
-      # an automated update while we're building, and to prevent version skews
-      - name: Update OS packages
-        run: |
-          set -ux
-          apt update
-          apt -y upgrade
-          apt -y full-upgrade
+        apt update
 
-      - name: Build U-Boot Android boot image for RB1
-        run: |
-            set -ux
-            # install build-dependencies
-            apt -y install git crossbuild-essential-arm64 make bison flex bc \
-                libssl-dev gnutls-dev xxd coreutils gzip mkbootimg fwupd
-            scripts/build-u-boot-rb1.sh
+        apt -y upgrade
 
-      - name: Stage artifacts for upload
-        run: |
-          set -ux
-          mkdir -v artifacts
-          cp -av \
-              u-boot/u-boot-nodtb.bin.gz \
-              u-boot/dts/upstream/src/arm64/qcom/qrb2210-rb1.dtb \
-              u-boot/u-boot-nodtb.bin.gz-dtb \
-              u-boot/u-boot.bin \
-              u-boot/rb1-boot.img \
-              u-boot/u-boot-cap.bin \
-              u-boot/u-boot.cab \
-              artifacts
+        apt -y full-upgrade
 
-      - name: Upload results to EFS
-        run: |
-          set -ux
-          export BUILD_DIR="/efs/${BUILD_ID}"
-          mkdir -vp "${BUILD_DIR}"
-          cp -av artifacts/* "${BUILD_DIR}"
-          # create or update u-boot-rb1-latest symlink
-          ln -fnsv "${BUILD_ID}" /efs/u-boot-rb1-latest
-          # perhaps help NFS sync
-          sync
+        '
+    - name: Build U-Boot Android boot image for RB1
+      run: "set -ux\n# install build-dependencies\napt -y install git crossbuild-essential-arm64\
+        \ make bison flex bc \\\n    libssl-dev gnutls-dev xxd coreutils gzip mkbootimg\
+        \ fwupd\nscripts/build-u-boot-rb1.sh\n"
+    - name: Stage artifacts for upload
+      run: "set -ux\nmkdir -v artifacts\ncp -av \\\n    u-boot/u-boot-nodtb.bin.gz\
+        \ \\\n    u-boot/dts/upstream/src/arm64/qcom/qrb2210-rb1.dtb \\\n    u-boot/u-boot-nodtb.bin.gz-dtb\
+        \ \\\n    u-boot/u-boot.bin \\\n    u-boot/rb1-boot.img \\\n    u-boot/u-boot-cap.bin\
+        \ \\\n    u-boot/u-boot.cab \\\n    artifacts\n"
+    - name: Upload results to EFS
+      run: 'set -ux
 
-      - name: Upload private artifacts
-        uses: qualcomm-linux/upload-private-artifact-action@aws-v4
-        id: upload_artifacts
-        with:
-          path: artifacts
-          # these should be the defaults; or ought to reuse BUILD_ID
-          s3_bucket: qcom-prd-gh-artifacts
-          destination: ${{ github.repository_owner }}/${{ github.event.repository.name }}/${{ github.run_id }}-${{ github.run_attempt }}/
+        export BUILD_DIR="/efs/${BUILD_ID}"
 
+        mkdir -vp "${BUILD_DIR}"
+
+        cp -av artifacts/* "${BUILD_DIR}"
+
+        # create or update u-boot-rb1-latest symlink
+
+        ln -fnsv "${BUILD_ID}" /efs/u-boot-rb1-latest
+
+        # perhaps help NFS sync
+
+        sync
+
+        '
+    - name: Upload private artifacts
+      uses: qualcomm-linux/upload-private-artifact-action@aws-v4
+      id: upload_artifacts
+      with:
+        path: artifacts
+        s3_bucket: qcom-prd-gh-artifacts
+        destination: ${{ github.repository_owner }}/${{ github.event.repository.name
+          }}/${{ github.run_id }}-${{ github.run_attempt }}/
