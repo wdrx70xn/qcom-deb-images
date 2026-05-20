@@ -1,6 +1,5 @@
 name: Build debos recipe
-
-on:
+'on':
   workflow_call:
     inputs:
       suite:
@@ -12,246 +11,212 @@ on:
         type: string
         default: qsc-deb-releases
       kernelpackage:
-        description: >
-          Kernel package to install from APT repositories (e.g.
-          linux-image-arm64) or name of a EFS kernel package directory
-          (e.g. efs/mainline)
+        description: 'Kernel package to install from APT repositories (e.g. linux-image-arm64)
+          or name of a EFS kernel package directory (e.g. efs/mainline)
+
+          '
         type: string
         default: default-ci
       debos_extra_args:
         description: Extra arguments to pass to debos (e.g. -t dtb:qcom/some.dtb)
         type: string
         default: ''
-      # useful if for some reason the kernel/image can't start in QEMU
       skip_qemu_tests:
         description: Skip QEMU tests
         type: boolean
         default: false
-
     outputs:
       artifacts_url:
-        description: "URL to retrieve build artifacts"
+        description: URL to retrieve build artifacts
         value: ${{ jobs.build-debos.outputs.url }}
-
-# implicitely set all other permissions to none
 permissions:
-  contents: read # actions/checkout
-
+  contents: read
 env:
-  # image build id; used for SBOM generation
   BUILD_ID: ${{ github.run_id }}-${{ github.run_attempt }}
   KERNEL_PACKAGE: ${{ inputs.kernelpackage }}
   SUITE: ${{ inputs.suite }}
   DEBOS_EXTRA_ARGS: -t suite:${{ inputs.suite }} ${{ inputs.debos_extra_args }}
   PREFIX: ${{ inputs.suite }}
-
 jobs:
   build-debos:
     name: Build and upload debos recipes (${{ inputs.suite }})
     outputs:
       url: ${{ steps.upload_artifacts_s3.outputs.url }}
-    runs-on: [self-hosted, qcom-u2404, arm64]
+    runs-on: ubuntu-latest
     container:
       image: public.ecr.aws/debian/debian:trixie
       volumes:
-        - /efs/qli/qcom-deb-images:/efs
+      - /efs/qli/qcom-deb-images:/efs
       options: --privileged
     steps:
-      # make sure we have latest packages first, to get latest fixes and to
-      # avoid an automated update while we're building
-      - name: Update OS packages
-        run: |
-          set -ux
-          apt update
-          apt -y upgrade
-          apt -y full-upgrade
+    - name: Update OS packages
+      run: 'set -ux
 
-      - uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
+        apt update
 
-      - name: Copy U-Boot for RB1 from EFS
-        run: cp -av "/efs/u-boot-rb1-latest/rb1-boot.img" .
+        apt -y upgrade
 
-      # mtools is needed for the flash recipe
-      - name: Install debos and dependencies of the recipes and local tests
-        run: apt -y install debian-archive-keyring debos make mmdebstrap mtools python3-pexpect python3-pytest qemu-efi-aarch64 qemu-system-arm xmlstarlet python3-defusedxml
+        apt -y full-upgrade
 
-      - name: Setup local APT repo
-        run: |
-          set -ux -o pipefail
+        '
+    - uses: actions/checkout@v6
+      with:
+        fetch-depth: 0
+    - name: Copy U-Boot for RB1 from EFS
+      run: cp -av "/efs/u-boot-rb1-latest/rb1-boot.img" .
+    - name: Install debos and dependencies of the recipes and local tests
+      run: apt -y install debian-archive-keyring debos make mmdebstrap mtools python3-pexpect
+        python3-pytest qemu-efi-aarch64 qemu-system-arm xmlstarlet python3-defusedxml
+    - name: Setup local APT repo
+      run: "set -ux -o pipefail\n\n# needed for apt-ftparchive\napt -y install --no-install-recommends\
+        \ apt-utils\nmkdir -v local-apt-repo\n\n# optionally, copy kernel debs from\
+        \ EFS\ncase \"$KERNEL_PACKAGE\" in\n  efs/*)\n    mkdir -v local-apt-repo/kernel\n\
+        \    # get kernel from EFS\n    cp -av \"/efs/${KERNEL_PACKAGE#efs/}/\"*.deb\
+        \ local-apt-repo/kernel\n  ;;\nesac\n\n(\n    cd local-apt-repo\n    apt-ftparchive\
+        \ packages . >Packages\n    apt-ftparchive release . >Release\n)\n"
+    - name: Build rootfs with debos
+      run: "set -ux\nkernel_package=\"$KERNEL_PACKAGE\"\nsuite=\"$SUITE\"\ncase \"\
+        $kernel_package\" in\n  # if kernel package is from EFS, determine actual\
+        \ package name\n  efs/*)\n    kernel_package=\"$(find local-apt-repo/kernel\
+        \ -type f -name 'linux-image-*' -not -name '*dbg*'|xargs -n1 basename|cut\
+        \ -f1 -d_)\"\n    ;;\n  default-ci)\n    case \"$suite\" in\n      trixie)\n\
+        \        # the package name will be passed to APT which interprets the trailing\n\
+        \        # plus sign in the package name as a request to install the package,\
+        \ so\n        # use two plus signs\n        kernel_package=\"linux-image-6.16.7-qcom1++\"\
+        \n        ;;\n      *)\n        kernel_package=\"linux-image-arm64\"\n   \
+        \     ;;\n    esac\n    ;;\nesac\n\ndebos \\\n    -t overlays:'${{ inputs.overlays\
+        \ }}' \\\n    -t xfcedesktop:true \\\n    -t aptlocalrepo:${PWD}/local-apt-repo\
+        \ \\\n    -t kernelpackage:\"$kernel_package\" \\\n    -t \"buildid:${BUILD_ID}\"\
+        \ \\\n    ${DEBOS_EXTRA_ARGS} \\\n    --print-recipe \\\n    debos-recipes/qualcomm-linux-debian-rootfs.yaml\n"
+    - name: Build UFS and SD card images with debos
+      run: 'set -ux
 
-          # needed for apt-ftparchive
-          apt -y install --no-install-recommends apt-utils
-          mkdir -v local-apt-repo
+        # debos tries KVM and UML as backends, and falls back to
 
-          # optionally, copy kernel debs from EFS
-          case "$KERNEL_PACKAGE" in
-            efs/*)
-              mkdir -v local-apt-repo/kernel
-              # get kernel from EFS
-              cp -av "/efs/${KERNEL_PACKAGE#efs/}/"*.deb local-apt-repo/kernel
-            ;;
-          esac
+        # building directly on the host, but that requires loop
 
-          (
-              cd local-apt-repo
-              apt-ftparchive packages . >Packages
-              apt-ftparchive release . >Release
-          )
+        # devices; use qemu backend explicitly even if it''s slower;
 
-      - name: Build rootfs with debos
-        run: |
-          set -ux
-          kernel_package="$KERNEL_PACKAGE"
-          suite="$SUITE"
-          case "$kernel_package" in
-            # if kernel package is from EFS, determine actual package name
-            efs/*)
-              kernel_package="$(find local-apt-repo/kernel -type f -name 'linux-image-*' -not -name '*dbg*'|xargs -n1 basename|cut -f1 -d_)"
-              ;;
-            default-ci)
-              case "$suite" in
-                trixie)
-                  # the package name will be passed to APT which interprets the trailing
-                  # plus sign in the package name as a request to install the package, so
-                  # use two plus signs
-                  kernel_package="linux-image-6.16.7-qcom1++"
-                  ;;
-                *)
-                  kernel_package="linux-image-arm64"
-                  ;;
-              esac
-              ;;
-          esac
+        # qemu backend also requires to set scratchsize, otherwise the
 
-          debos \
-              -t overlays:'${{ inputs.overlays }}' \
-              -t xfcedesktop:true \
-              -t aptlocalrepo:${PWD}/local-apt-repo \
-              -t kernelpackage:"$kernel_package" \
-              -t "buildid:${BUILD_ID}" \
-              ${DEBOS_EXTRA_ARGS} \
-              --print-recipe \
-              debos-recipes/qualcomm-linux-debian-rootfs.yaml
+        # whole build is done from memory and the out of memory killer
 
-      - name: Build UFS and SD card images with debos
-        run: |
-          set -ux
-          # debos tries KVM and UML as backends, and falls back to
-          # building directly on the host, but that requires loop
-          # devices; use qemu backend explicitly even if it's slower;
-          # qemu backend also requires to set scratchsize, otherwise the
-          # whole build is done from memory and the out of memory killer
-          # gets triggered
-          make disk-ufs.img FAKEMACHINE_OPTS="-b qemu" EXTRA_DEBOS_OPTS="--print-recipe ${DEBOS_EXTRA_ARGS}"
-          make disk-sdcard.img FAKEMACHINE_OPTS="-b qemu" EXTRA_DEBOS_OPTS="--print-recipe ${DEBOS_EXTRA_ARGS}"
+        # gets triggered
 
-      - name: Build flashable files with debos
-        run: |
-          set -ux
-          make flash FAKEMACHINE_OPTS="-b qemu" EXTRA_DEBOS_OPTS="-t u_boot_rb1:rb1-boot.img -t buildid:${BUILD_ID} --print-recipe ${DEBOS_EXTRA_ARGS}"
+        make disk-ufs.img FAKEMACHINE_OPTS="-b qemu" EXTRA_DEBOS_OPTS="--print-recipe
+        ${DEBOS_EXTRA_ARGS}"
 
-      - name: Stage debos artifacts for publishing
-        run: |
-          set -ux
-          # create a directory for the current run
-          dir="debos-artifacts"
-          mkdir -v "${dir}"
-          # compress output files directly into the staging directory
-          gzip -c rootfs.tar >"${dir}/${PREFIX}-rootfs.tar.gz"
-          gzip -c disk-ufs.img >"${dir}/${PREFIX}-disk-ufs.img.gz"
-          gzip -c disk-sdcard.img >"${dir}/${PREFIX}-disk-sdcard.img.gz"
-          cp -av dtbs.tar.gz "${dir}/${PREFIX}-dtbs.tar.gz"
-          # create tarballs with support for all UFS and all eMMC boards
-          scripts/bundle-flash-dirs.sh "${dir}" "${PREFIX}"
-          # generate sha256sums for all artifacts
-          (cd "${dir}" && sha256sum * | tee "${PREFIX}-sha256sums.txt")
+        make disk-sdcard.img FAKEMACHINE_OPTS="-b qemu" EXTRA_DEBOS_OPTS="--print-recipe
+        ${DEBOS_EXTRA_ARGS}"
 
-      # upload to a cloud storage space accessible by Axiom
-      - name: Upload private artifacts (S3)
-        uses: qualcomm-linux/upload-private-artifact-action@aws-v4
-        id: upload_artifacts_s3
-        with:
-          path: debos-artifacts
-          # these should be the defaults; or ought to reuse BUILD_ID
-          s3_bucket: qcom-prd-gh-artifacts
-          destination: ${{ github.repository_owner }}/${{ github.event.repository.name }}/${{ github.run_id }}-${{ github.run_attempt }}/
+        '
+    - name: Build flashable files with debos
+      run: 'set -ux
 
-      - name: Unpack rootfs to generate SBOM
-        run: mkdir -v rootfs && tar -C rootfs -xf rootfs.tar
+        make flash FAKEMACHINE_OPTS="-b qemu" EXTRA_DEBOS_OPTS="-t u_boot_rb1:rb1-boot.img
+        -t buildid:${BUILD_ID} --print-recipe ${DEBOS_EXTRA_ARGS}"
 
-      # Syft is not packaged in Debian; it's available as a binary tarball or
-      # as container image from upstream; it's available on arm64 and x86
-      - name: Install Syft
-        run: |
-          set -ux
-          apt -y install curl
-          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh
+        '
+    - name: Stage debos artifacts for publishing
+      run: 'set -ux
 
-      - name: Generate SBOMs with Syft
-        run: |
-          set -ux
-          bin/syft --version
-          SYFT_FORMAT_PRETTY=true bin/syft \
-              -o cyclonedx-json=rootfs-sbom.cyclonedx.json \
-              -o spdx-json=rootfs-sbom.spdx.json \
-              -o syft-json=rootfs-sbom.syft.json \
-              -o syft-text=rootfs-sbom.syft.txt \
-              -o syft-table \
-              --parallelism `nproc` \
-              --select-catalogers debian \
-              --source-name qualcomm-linux-debian-rootfs \
-              --source-version "${BUILD_ID}" \
-              -v \
-              scan rootfs
+        # create a directory for the current run
 
-      - name: Generate license summary from Syft report
-        run: |
-          set -ux
-          scripts/syft-license-summary.py \
-              --rootfs rootfs rootfs-sbom.syft.json |
-                  tee rootfs-sbom.syft-license-summary.csv.txt
+        dir="debos-artifacts"
 
-      - name: Stage SBOMs for publishing
-        run: |
-          set -ux
-          dir="sboms"
-          mkdir -v sboms
-          for f in rootfs-sbom.*; do
-              gzip -c "$f" >"${dir}/${PREFIX}-${f}.gz"
-          done
+        mkdir -v "${dir}"
 
-      - name: Upload SBOMs as private artifacts
-        uses: qualcomm-linux/upload-private-artifact-action@aws-v4
-        id: upload_sbom_artifacts
-        with:
-          path: sboms
-          # these should be the defaults; or ought to reuse BUILD_ID
-          s3_bucket: qcom-prd-gh-artifacts
-          destination: ${{ github.repository_owner }}/${{ github.event.repository.name }}/${{ github.run_id }}-${{ github.run_attempt }}/
+        # compress output files directly into the staging directory
 
-      - name: "Print output"
-        env:
-          build_url: ${{ steps.upload_artifacts_s3.outputs.url }}
-        run: |
-          echo "Downloads URL: ${build_url}"
-          echo "url=\"${build_url}\"" >> $GITHUB_OUTPUT
-          echo "${build_url}" > build_url
-          echo "## Download URL" >> $GITHUB_STEP_SUMMARY
-          echo "[${build_url}](${build_url})" >> $GITHUB_STEP_SUMMARY
-      - name: Upload build URL
-        uses: actions/upload-artifact@v7
-        with:
-          name: build_url
-          path: build_url
-      - name: Invoke test runner
-        if: ${{ !inputs.skip_qemu_tests }}
-        run: |
-           # This is currently a clone of Makefile's "test" target to avoid any
-           # unexpected interactions with triggering depending build targets.
-           # The plan is to move this entire workflow to use make targets
-           # instead but all at once. See #74 and #159.
+        gzip -c rootfs.tar >"${dir}/${PREFIX}-rootfs.tar.gz"
 
-           # rootfs/ is a build artifact, so should not be scanned for tests
-           py.test-3 --ignore=rootfs
+        gzip -c disk-ufs.img >"${dir}/${PREFIX}-disk-ufs.img.gz"
+
+        gzip -c disk-sdcard.img >"${dir}/${PREFIX}-disk-sdcard.img.gz"
+
+        cp -av dtbs.tar.gz "${dir}/${PREFIX}-dtbs.tar.gz"
+
+        # create tarballs with support for all UFS and all eMMC boards
+
+        scripts/bundle-flash-dirs.sh "${dir}" "${PREFIX}"
+
+        # generate sha256sums for all artifacts
+
+        (cd "${dir}" && sha256sum * | tee "${PREFIX}-sha256sums.txt")
+
+        '
+    - name: Upload private artifacts (S3)
+      uses: qualcomm-linux/upload-private-artifact-action@aws-v4
+      id: upload_artifacts_s3
+      with:
+        path: debos-artifacts
+        s3_bucket: qcom-prd-gh-artifacts
+        destination: ${{ github.repository_owner }}/${{ github.event.repository.name
+          }}/${{ github.run_id }}-${{ github.run_attempt }}/
+    - name: Unpack rootfs to generate SBOM
+      run: mkdir -v rootfs && tar -C rootfs -xf rootfs.tar
+    - name: Install Syft
+      run: 'set -ux
+
+        apt -y install curl
+
+        curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh
+        | sh
+
+        '
+    - name: Generate SBOMs with Syft
+      run: "set -ux\nbin/syft --version\nSYFT_FORMAT_PRETTY=true bin/syft \\\n   \
+        \ -o cyclonedx-json=rootfs-sbom.cyclonedx.json \\\n    -o spdx-json=rootfs-sbom.spdx.json\
+        \ \\\n    -o syft-json=rootfs-sbom.syft.json \\\n    -o syft-text=rootfs-sbom.syft.txt\
+        \ \\\n    -o syft-table \\\n    --parallelism `nproc` \\\n    --select-catalogers\
+        \ debian \\\n    --source-name qualcomm-linux-debian-rootfs \\\n    --source-version\
+        \ \"${BUILD_ID}\" \\\n    -v \\\n    scan rootfs\n"
+    - name: Generate license summary from Syft report
+      run: "set -ux\nscripts/syft-license-summary.py \\\n    --rootfs rootfs rootfs-sbom.syft.json\
+        \ |\n        tee rootfs-sbom.syft-license-summary.csv.txt\n"
+    - name: Stage SBOMs for publishing
+      run: "set -ux\ndir=\"sboms\"\nmkdir -v sboms\nfor f in rootfs-sbom.*; do\n \
+        \   gzip -c \"$f\" >\"${dir}/${PREFIX}-${f}.gz\"\ndone\n"
+    - name: Upload SBOMs as private artifacts
+      uses: qualcomm-linux/upload-private-artifact-action@aws-v4
+      id: upload_sbom_artifacts
+      with:
+        path: sboms
+        s3_bucket: qcom-prd-gh-artifacts
+        destination: ${{ github.repository_owner }}/${{ github.event.repository.name
+          }}/${{ github.run_id }}-${{ github.run_attempt }}/
+    - name: Print output
+      env:
+        build_url: ${{ steps.upload_artifacts_s3.outputs.url }}
+      run: 'echo "Downloads URL: ${build_url}"
+
+        echo "url=\"${build_url}\"" >> $GITHUB_OUTPUT
+
+        echo "${build_url}" > build_url
+
+        echo "## Download URL" >> $GITHUB_STEP_SUMMARY
+
+        echo "[${build_url}](${build_url})" >> $GITHUB_STEP_SUMMARY
+
+        '
+    - name: Upload build URL
+      uses: actions/upload-artifact@v7
+      with:
+        name: build_url
+        path: build_url
+    - name: Invoke test runner
+      if: ${{ !inputs.skip_qemu_tests }}
+      run: '# This is currently a clone of Makefile''s "test" target to avoid any
+
+        # unexpected interactions with triggering depending build targets.
+
+        # The plan is to move this entire workflow to use make targets
+
+        # instead but all at once. See #74 and #159.
+
+
+        # rootfs/ is a build artifact, so should not be scanned for tests
+
+        py.test-3 --ignore=rootfs
+
+        '
