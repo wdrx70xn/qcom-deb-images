@@ -1,13 +1,12 @@
 name: Build Linux kernel deb and debos image
-
-on:
+'on':
   workflow_call:
     inputs:
       kernel_name:
         description: 'Name of the kernel to build (default: mainline)'
         required: false
         type: string
-        default: 'mainline'
+        default: mainline
       debos_extra_args:
         description: Extra arguments to pass to debos (e.g. -t dtb:qcom/some.dtb)
         required: false
@@ -29,16 +28,17 @@ on:
         type: boolean
         default: false
       lava_boards_include:
-        description: JSON array of board names to include in LAVA tests (empty = all boards)
+        description: JSON array of board names to include in LAVA tests (empty = all
+          boards)
         required: false
         type: string
         default: ''
       lava_boards_exclude:
-        description: JSON array of board names to exclude from LAVA tests (empty = none excluded)
+        description: JSON array of board names to exclude from LAVA tests (empty =
+          none excluded)
         required: false
         type: string
         default: ''
-  # allow manual runs
   workflow_dispatch:
     inputs:
       kernel_name:
@@ -53,98 +53,90 @@ on:
         description: Extra arguments to pass to build-linux-deb.py
         required: false
         type: string
-
-# implicitely set all other permissions to none
 permissions:
-  checks: write # lava-test.yml
-  contents: read # actions/checkout debos.yml lava-test.yml
-  packages: read # lava-test.yml
-  pull-requests: write # lava-test.yml
-
+  checks: write
+  contents: read
+  packages: read
+  pull-requests: write
 env:
-  # github runs are only unique per repository and may also be re-run; create a
-  # build id for the current run
-  BUILD_ID: ${{ github.event.repository.name }}-${{ github.run_id }}-${{ github.run_attempt }}
-  # name of the kernel being built
+  BUILD_ID: ${{ github.event.repository.name }}-${{ github.run_id }}-${{ github.run_attempt
+    }}
   KERNEL_NAME: ${{ inputs.kernel_name || 'mainline' }}
-  # extra args to pass to build-linux-deb.py
   BUILD_LINUX_DEB_EXTRA_ARGS: ${{ inputs.build_linux_deb_extra_args }}
-
-# cancel in progress builds for this workflow triggered by the same ref
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.kernel_name || 'mainline' }}
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.kernel_name || 'mainline'
+    }}
   cancel-in-progress: true
-
 jobs:
   build-linux-deb:
-    # don't run cron from forks of the main repository or from other branches
     if: github.repository == 'qualcomm-linux/qcom-deb-images' && github.ref == 'refs/heads/main'
-    # for cross-builds
-    runs-on: [self-hosted, qcom-u2404, amd64]
-    # alternative for native builds, but overkill to do both
-    #runs-on: [self-hosted, qcom-u2404, arm64]
+    runs-on: ubuntu-latest
     container:
       image: public.ecr.aws/debian/debian:trixie
       volumes:
-        - /efs/qli/qcom-deb-images:/efs
+      - /efs/qli/qcom-deb-images:/efs
     steps:
-      - uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
+    - uses: actions/checkout@v6
+      with:
+        fetch-depth: 0
+    - name: Update OS packages
+      run: 'set -ux
 
-      # make sure we have latest packages first, to get latest fixes, to avoid
-      # an automated update while we're building, and to prevent version skews
-      - name: Update OS packages
-        run: |
-          set -ux
-          apt update
-          apt -y upgrade
-          apt -y full-upgrade
+        apt update
 
-      - name: Build Linux kernel deb
-        run: |
-            set -ux
-            # download arm64 package lists to install cross build-dependencies
-            if [ "$(dpkg --print-architecture)" != arm64 ]; then
-                dpkg --add-architecture arm64
-                apt update
-            fi
-            # install build-dependencies; TODO: --no-install-recommends
-            apt -y install git crossbuild-essential-arm64 make flex bison bc \
-                libdw-dev libelf-dev libssl-dev libssl-dev:arm64 dpkg-dev \
-                debhelper kmod python3 rsync coreutils
-            scripts/build-linux-deb.py ${BUILD_LINUX_DEB_EXTRA_ARGS} \
-                `ls kernel-configs/*.config | sort` \
+        apt -y upgrade
 
-      - name: Stage artifacts for upload
-        run: |
-          set -ux
-          # dcmd from devscripts will be used to parse .changes file
-          apt -y install --no-install-recommends devscripts
-          # stage artifacts in a directory
-          mkdir -v artifacts
-          cp -av `dcmd *.changes` artifacts
+        apt -y full-upgrade
 
-      - name: Upload results to EFS
-        run: |
-          set -ux
-          export BUILD_DIR="/efs/${BUILD_ID}"
-          mkdir -vp "${BUILD_DIR}"
-          cp -av artifacts/* "${BUILD_DIR}"
-          # create or update symlink
-          ln -fnsv "${BUILD_ID}" "/efs/${KERNEL_NAME}"
-          # perhaps help NFS sync
-          sync
+        '
+    - name: Build Linux kernel deb
+      run: "set -ux\n# download arm64 package lists to install cross build-dependencies\n\
+        if [ \"$(dpkg --print-architecture)\" != arm64 ]; then\n    dpkg --add-architecture\
+        \ arm64\n    apt update\nfi\n# install build-dependencies; TODO: --no-install-recommends\n\
+        apt -y install git crossbuild-essential-arm64 make flex bison bc \\\n    libdw-dev\
+        \ libelf-dev libssl-dev libssl-dev:arm64 dpkg-dev \\\n    debhelper kmod python3\
+        \ rsync coreutils\nscripts/build-linux-deb.py ${BUILD_LINUX_DEB_EXTRA_ARGS}\
+        \ \\\n    `ls kernel-configs/*.config | sort` \\\n"
+    - name: Stage artifacts for upload
+      run: 'set -ux
 
-      - name: Upload private artifacts
-        uses: qualcomm-linux/upload-private-artifact-action@aws-v4
-        id: upload_artifacts
-        with:
-          path: artifacts
-          # these should be the defaults; or ought to reuse BUILD_ID
-          s3_bucket: qcom-prd-gh-artifacts
-          destination: ${{ github.repository_owner }}/${{ github.event.repository.name }}/${{ github.run_id }}-${{ github.run_attempt }}/
+        # dcmd from devscripts will be used to parse .changes file
 
+        apt -y install --no-install-recommends devscripts
+
+        # stage artifacts in a directory
+
+        mkdir -v artifacts
+
+        cp -av `dcmd *.changes` artifacts
+
+        '
+    - name: Upload results to EFS
+      run: 'set -ux
+
+        export BUILD_DIR="/efs/${BUILD_ID}"
+
+        mkdir -vp "${BUILD_DIR}"
+
+        cp -av artifacts/* "${BUILD_DIR}"
+
+        # create or update symlink
+
+        ln -fnsv "${BUILD_ID}" "/efs/${KERNEL_NAME}"
+
+        # perhaps help NFS sync
+
+        sync
+
+        '
+    - name: Upload private artifacts
+      uses: qualcomm-linux/upload-private-artifact-action@aws-v4
+      id: upload_artifacts
+      with:
+        path: artifacts
+        s3_bucket: qcom-prd-gh-artifacts
+        destination: ${{ github.repository_owner }}/${{ github.event.repository.name
+          }}/${{ github.run_id }}-${{ github.run_attempt }}/
   debos-linux-deb:
     needs: build-linux-deb
     uses: ./.github/workflows/debos.yml
@@ -152,7 +144,6 @@ jobs:
       kernelpackage: efs/${{ inputs.kernel_name || 'mainline' }}
       debos_extra_args: ${{ inputs.debos_extra_args }}
       skip_qemu_tests: ${{ inputs.skip_qemu_tests || false }}
-
   test-linux-deb:
     if: ${{ !inputs.skip_lava_tests }}
     uses: ./.github/workflows/lava-test.yml
